@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+const { GoogleSpreadsheet } = require('google-spreadsheet');
+const { JWT } = require('google-auth-library');
 require('dotenv').config();
 
 const app = express();
@@ -30,6 +32,45 @@ app.use(express.json());
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+
+// Initialize Google Sheets (optional feature)
+const GOOGLE_SHEETS_PRIVATE_KEY = process.env.GOOGLE_SHEETS_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const GOOGLE_SHEETS_CLIENT_EMAIL = process.env.GOOGLE_SHEETS_CLIENT_EMAIL;
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+
+let googleSheetsAuth = null;
+let googleSheet = null;
+
+// Initialize Google Sheets connection (non-blocking)
+async function initializeGoogleSheets() {
+  try {
+    if (!GOOGLE_SHEETS_PRIVATE_KEY || !GOOGLE_SHEETS_CLIENT_EMAIL || !GOOGLE_SHEET_ID) {
+      console.log('ℹ️  Google Sheets credentials not configured - sheets features disabled');
+      return false;
+    }
+
+    googleSheetsAuth = new JWT({
+      email: GOOGLE_SHEETS_CLIENT_EMAIL,
+      key: GOOGLE_SHEETS_PRIVATE_KEY,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    googleSheet = new GoogleSpreadsheet(GOOGLE_SHEET_ID, googleSheetsAuth);
+    await googleSheet.loadInfo();
+    
+    console.log('✅ Google Sheets initialized successfully');
+    console.log('📊 Sheet Title:', googleSheet.title);
+    return true;
+  } catch (error) {
+    console.log('ℹ️  Google Sheets initialization failed (optional feature):', error.message);
+    return false;
+  }
+}
+
+// Initialize Google Sheets on startup (non-blocking)
+initializeGoogleSheets().catch(() => {
+  console.log('ℹ️  Continuing without Google Sheets integration');
 });
 
 // Startup/readiness probe for Render
@@ -126,6 +167,230 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Google Sheets endpoints (optional features - won't affect Razorpay)
+app.post('/api/log-order', async (req, res) => {
+  try {
+    const {
+      orderId,
+      customerName,
+      phone,
+      email,
+      itemsCount,
+      totalAmount,
+      paymentStatus,
+      transactionMode,
+      orderDate,
+      deliveryAddress,
+      paymentId
+    } = req.body;
+
+    console.log('📝 Logging order to Google Sheets:', orderId);
+
+    if (!googleSheet) {
+      console.log('⚠️ Google Sheets not initialized, attempting to reinitialize...');
+      const initialized = await initializeGoogleSheets();
+      if (!initialized) {
+        return res.status(500).json({
+          success: false,
+          error: 'Google Sheets service unavailable'
+        });
+      }
+    }
+
+    // Get or create the orders sheet
+    let sheet = googleSheet.sheetsByTitle['Orders'];
+    if (!sheet) {
+      sheet = await googleSheet.addSheet({
+        title: 'Orders',
+        headerValues: [
+          'Order ID',
+          'Customer Name',
+          'Phone',
+          'Email',
+          'Items Count',
+          'Total Amount',
+          'Payment Status',
+          'Transaction Mode',
+          'Order Date',
+          'Delivery Address',
+          'Payment ID',
+          'Created At'
+        ]
+      });
+      console.log('✅ Created new Orders sheet');
+    }
+
+    // Add the order data
+    await sheet.addRow({
+      'Order ID': orderId,
+      'Customer Name': customerName,
+      'Phone': phone,
+      'Email': email,
+      'Items Count': itemsCount,
+      'Total Amount': totalAmount,
+      'Payment Status': paymentStatus,
+      'Transaction Mode': transactionMode,
+      'Order Date': orderDate,
+      'Delivery Address': deliveryAddress,
+      'Payment ID': paymentId || 'N/A',
+      'Created At': new Date().toISOString()
+    });
+
+    console.log('✅ Order logged to Google Sheets successfully:', orderId);
+
+    res.json({
+      success: true,
+      message: 'Order logged successfully'
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to log order to Google Sheets:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to log order'
+    });
+  }
+});
+
+app.post('/api/update-payment-status', async (req, res) => {
+  try {
+    const { orderId, paymentStatus, paymentId } = req.body;
+
+    console.log('🔄 Updating payment status for order:', orderId);
+
+    if (!googleSheet) {
+      console.log('⚠️ Google Sheets not initialized, attempting to reinitialize...');
+      const initialized = await initializeGoogleSheets();
+      if (!initialized) {
+        return res.status(500).json({
+          success: false,
+          error: 'Google Sheets service unavailable'
+        });
+      }
+    }
+
+    const sheet = googleSheet.sheetsByTitle['Orders'];
+    if (!sheet) {
+      return res.status(404).json({
+        success: false,
+        error: 'Orders sheet not found'
+      });
+    }
+
+    // Find and update the row
+    const rows = await sheet.getRows();
+    const targetRow = rows.find(row => row.get('Order ID') === orderId);
+
+    if (targetRow) {
+      targetRow.set('Payment Status', paymentStatus);
+      if (paymentId) {
+        targetRow.set('Payment ID', paymentId);
+      }
+      await targetRow.save();
+
+      console.log('✅ Payment status updated successfully:', orderId);
+      res.json({
+        success: true,
+        message: 'Payment status updated successfully'
+      });
+    } else {
+      console.log('⚠️ Order not found in sheet:', orderId);
+      res.status(404).json({
+        success: false,
+        error: 'Order not found'
+      });
+    }
+
+  } catch (error) {
+    console.error('❌ Failed to update payment status:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update payment status'
+    });
+  }
+});
+
+app.get('/api/orders', async (req, res) => {
+  try {
+    if (!googleSheet) {
+      const initialized = await initializeGoogleSheets();
+      if (!initialized) {
+        return res.status(500).json({
+          success: false,
+          error: 'Google Sheets service unavailable'
+        });
+      }
+    }
+
+    const sheet = googleSheet.sheetsByTitle['Orders'];
+    if (!sheet) {
+      return res.json({
+        success: true,
+        orders: [],
+        message: 'No orders sheet found'
+      });
+    }
+
+    const rows = await sheet.getRows();
+    const orders = rows.map(row => ({
+      orderId: row.get('Order ID'),
+      customerName: row.get('Customer Name'),
+      phone: row.get('Phone'),
+      email: row.get('Email'),
+      itemsCount: row.get('Items Count'),
+      totalAmount: row.get('Total Amount'),
+      paymentStatus: row.get('Payment Status'),
+      transactionMode: row.get('Transaction Mode'),
+      orderDate: row.get('Order Date'),
+      deliveryAddress: row.get('Delivery Address'),
+      paymentId: row.get('Payment ID'),
+      createdAt: row.get('Created At')
+    }));
+
+    console.log('📊 Retrieved', orders.length, 'orders from Google Sheets');
+
+    res.json({
+      success: true,
+      orders: orders,
+      count: orders.length
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to retrieve orders:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to retrieve orders'
+    });
+  }
+});
+
+app.get('/api/test-sheets', async (req, res) => {
+  try {
+    if (!googleSheet) {
+      const initialized = await initializeGoogleSheets();
+      if (!initialized) {
+        return res.status(500).json({
+          success: false,
+          error: 'Google Sheets service unavailable'
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Google Sheets connection successful',
+      sheetTitle: googleSheet.title
+    });
+
+  } catch (error) {
+    console.error('❌ Google Sheets test failed:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Google Sheets test failed'
+    });
+  }
+});
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
@@ -135,7 +400,11 @@ app.get('/', (req, res) => {
       health: '/health',
       test: '/api/test',
       createOrder: '/api/create-razorpay-order',
-      verifyPayment: '/api/verify-payment'
+      verifyPayment: '/api/verify-payment',
+      logOrder: '/api/log-order',
+      updatePaymentStatus: '/api/update-payment-status',
+      getOrders: '/api/orders',
+      testSheets: '/api/test-sheets'
     }
   });
 });
