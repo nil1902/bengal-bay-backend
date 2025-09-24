@@ -185,7 +185,8 @@ app.post('/api/log-order', async (req, res) => {
       deliveryOTP,
       orderStatus,
       otpVerified,
-      deliveryVerificationTime
+      deliveryVerificationTime,
+      orderItems
     } = req.body;
 
     console.log('📝 Logging order to Google Sheets:', orderId);
@@ -211,6 +212,7 @@ app.post('/api/log-order', async (req, res) => {
           'Customer Name',
           'Phone',
           'Email',
+          'Order Items',
           'Items Count',
           'Total Amount',
           'Payment Status',
@@ -228,12 +230,28 @@ app.post('/api/log-order', async (req, res) => {
       console.log('✅ Created new Orders sheet with enhanced COD tracking');
     }
 
+    // Process order items - convert array to comma-separated string
+    let orderItemsString = 'N/A';
+    if (orderItems && Array.isArray(orderItems)) {
+      orderItemsString = orderItems.map(item => {
+        if (typeof item === 'string') {
+          return item;
+        } else if (item && item.name) {
+          return `${item.name}${item.quantity ? ` (x${item.quantity})` : ''}`;
+        }
+        return JSON.stringify(item);
+      }).join(', ');
+    } else if (orderItems && typeof orderItems === 'string') {
+      orderItemsString = orderItems;
+    }
+
     // Add the order data
     await sheet.addRow({
       'Order ID': orderId,
       'Customer Name': customerName,
       'Phone': phone,
       'Email': email,
+      'Order Items': orderItemsString,
       'Items Count': itemsCount,
       'Total Amount': totalAmount,
       'Payment Status': paymentStatus,
@@ -349,6 +367,7 @@ app.get('/api/orders', async (req, res) => {
       customerName: row.get('Customer Name'),
       phone: row.get('Phone'),
       email: row.get('Email'),
+      orderItems: row.get('Order Items'),
       itemsCount: row.get('Items Count'),
       totalAmount: row.get('Total Amount'),
       paymentStatus: row.get('Payment Status'),
@@ -502,6 +521,7 @@ app.get('/api/order/:orderId', async (req, res) => {
       customerName: targetRow.get('Customer Name'),
       phone: targetRow.get('Phone'),
       email: targetRow.get('Email'),
+      orderItems: targetRow.get('Order Items'),
       totalAmount: targetRow.get('Total Amount'),
       paymentStatus: targetRow.get('Payment Status'),
       transactionMode: targetRow.get('Transaction Mode'),
